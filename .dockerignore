@@ -1,0 +1,6 @@
+## Evita que copiemos basura a las imagenes
+
+**/node_modules
+**/dist
+.git
+.env
