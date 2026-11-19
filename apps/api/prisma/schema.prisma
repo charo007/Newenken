@@ -1,0 +1,209 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+enum ProductType {
+  SIMPLE
+  MIX
+}
+
+enum Measure {
+  WEIGHT
+  UNIT
+}
+
+enum Presentation {
+  KILO
+  HALF
+  QUARTER
+  UNIT
+}
+
+enum PurchaseStatus {
+  DRAFT
+  CONFIRMED
+}
+
+enum OrderStatus {
+  OPEN
+  FINALIZED
+  CANCELED
+}
+
+enum MovementType {
+  PURCHASE
+  SALE
+  RETURN
+  ADJUSTMENT
+  WASTE
+}
+
+model User {
+  id           Int    @id @default(autoincrement())
+  email        String @unique
+  name         String
+  passwordHash String
+}
+
+// Fila única con los valores generales (id siempre 1). Márgenes en %.
+model Settings {
+  id            Int     @id @default(1)
+  kiloMargin    Decimal @default(30) @db.Decimal(5, 2)
+  halfMargin    Decimal @default(40) @db.Decimal(5, 2)
+  quarterMargin Decimal @default(45) @db.Decimal(5, 2)
+  unitMargin    Decimal @default(30) @db.Decimal(5, 2)
+  roundTo       Int     @default(10) // redondear precios a múltiplos de $
+}
+
+model Category {
+  id        Int       @id @default(autoincrement())
+  name      String    @unique
+  sortOrder Int       @default(0)
+  products  Product[]
+}
+
+model Product {
+  id         Int         @id @default(autoincrement())
+  name       String
+  categoryId Int
+  category   Category    @relation(fields: [categoryId], references: [id])
+  type       ProductType @default(SIMPLE)
+  measure    Measure     @default(WEIGHT)
+  // Costo efectivo vigente por kilo (WEIGHT) o por unidad (UNIT).
+  // En los mixes no se usa: se calcula como promedio de sus ingredientes.
+  cost       Decimal?    @db.Decimal(12, 2)
+  usesBag    Boolean     @default(true)
+  // Márgenes propios; null = usar los generales
+  kiloMargin    Decimal? @db.Decimal(5, 2)
+  halfMargin    Decimal? @db.Decimal(5, 2)
+  quarterMargin Decimal? @db.Decimal(5, 2)
+  unitMargin    Decimal? @db.Decimal(5, 2)
+  minStock      Decimal  @default(0) @db.Decimal(12, 2) // gramos o unidades
+  isCustom      Boolean  @default(false) // mix armado para un solo pedido
+  active        Boolean  @default(true)
+
+  mixIngredients MixIngredient[]    @relation("Mix")
+  usedInMixes    MixIngredient[]    @relation("Ingredient")
+  purchaseItems  PurchaseItem[]
+  orderItems     CustomerOrderItem[]
+  stockMovements StockMovement[]
+
+  @@index([categoryId])
+}
+
+model MixIngredient {
+  mixId        Int
+  ingredientId Int
+  mix          Product @relation("Mix", fields: [mixId], references: [id])
+  ingredient   Product @relation("Ingredient", fields: [ingredientId], references: [id])
+
+  @@id([mixId, ingredientId])
+}
+
+// Compra de mercadería al proveedor. Shipping y extras se reparten por valor entre sus productos.
+model Purchase {
+  id       Int            @id @default(autoincrement())
+  date     DateTime       @default(now())
+  supplier String?
+  status   PurchaseStatus @default(DRAFT)
+  shipping Decimal        @default(0) @db.Decimal(12, 2)
+  extras   Decimal        @default(0) @db.Decimal(12, 2)
+  items    PurchaseItem[]
+}
+
+model PurchaseItem {
+  id            Int      @id @default(autoincrement())
+  purchaseId    Int
+  purchase      Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  productId     Int
+  product       Product  @relation(fields: [productId], references: [id])
+  quantity      Decimal  @db.Decimal(12, 2) // gramos o unidades
+  baseCost      Decimal  @db.Decimal(12, 2) // lo que cobra el proveedor, por kilo o unidad
+  effectiveCost Decimal? @db.Decimal(12, 2) // con shipping y extras repartidos (se fija al confirmar)
+  stockMovements StockMovement[]
+}
+
+// Algo que comprás aparte de la mercadería (bolsas, etiquetas...).
+// Si addsToPrice es true, su unitCost se suma al precio de cada producto.
+model Supply {
+  id             Int             @id @default(autoincrement())
+  name           String          @unique
+  unitCost       Decimal         @default(0) @db.Decimal(12, 4) // el de la última compra
+  addsToPrice    Boolean         @default(true)
+  extraPurchases ExtraPurchase[]
+}
+
+// Solapa "Compra extra". Sin quantity cuenta solo como gasto.
+model ExtraPurchase {
+  id          Int      @id @default(autoincrement())
+  date        DateTime @default(now())
+  description String
+  total       Decimal  @db.Decimal(12, 2)
+  quantity    Int?     // si es por unidades
+  unitCost    Decimal? @db.Decimal(12, 4) // total ÷ quantity, se calcula al guardar
+  supplyId    Int?
+  supply      Supply?  @relation(fields: [supplyId], references: [id])
+}
+
+model Customer {
+  id     Int             @id @default(autoincrement())
+  name   String
+  phone  String?
+  orders CustomerOrder[]
+}
+
+model CustomerOrder {
+  id          Int                 @id @default(autoincrement())
+  customerId  Int
+  customer    Customer            @relation(fields: [customerId], references: [id])
+  date        DateTime            @default(now())
+  status      OrderStatus         @default(OPEN)
+  deliveredAt DateTime?
+  total       Decimal             @default(0) @db.Decimal(12, 2) // se fija al finalizar
+  items       CustomerOrderItem[]
+  payments    Payment[]
+}
+
+model CustomerOrderItem {
+  id             Int           @id @default(autoincrement())
+  orderId        Int
+  order          CustomerOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId      Int
+  product        Product       @relation(fields: [productId], references: [id])
+  presentation   Presentation
+  quantity       Int           // cantidad de bolsas o unidades
+  unitPrice      Decimal       @db.Decimal(12, 2) // precio al momento de la venta
+  unitCost       Decimal       @db.Decimal(12, 2) // costo al momento de la venta
+  stockMovements StockMovement[]
+}
+
+model Payment {
+  id      Int           @id @default(autoincrement())
+  orderId Int
+  order   CustomerOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  amount  Decimal       @db.Decimal(12, 2)
+  date    DateTime      @default(now())
+  note    String?
+}
+
+// El stock actual de un producto es la suma de sus movimientos.
+model StockMovement {
+  id             Int                @id @default(autoincrement())
+  productId      Int
+  product        Product            @relation(fields: [productId], references: [id])
+  type           MovementType
+  quantity       Decimal            @db.Decimal(12, 2) // + entra, − sale (gramos o unidades)
+  date           DateTime           @default(now())
+  purchaseItemId Int?
+  purchaseItem   PurchaseItem?      @relation(fields: [purchaseItemId], references: [id])
+  orderItemId    Int?
+  orderItem      CustomerOrderItem? @relation(fields: [orderItemId], references: [id])
+  note           String?
+
+  @@index([productId])
+}
